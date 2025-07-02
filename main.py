@@ -15,6 +15,35 @@ def get_rotational_type(dev):
     except Exception:
         return "unknown"
 
+def get_zpool_partition_map():
+    """Returns a map of /dev/sdXn -> pool name"""
+    partition_map = {}
+    try:
+        result = subprocess.run(["zpool", "status", "-L"], capture_output=True, text=True, timeout=5)
+        current_pool = None
+        for line in result.stdout.splitlines():
+            if line.strip().startswith("pool:"):
+                current_pool = line.split(":", 1)[1].strip()
+                continue
+
+            # Match partition names like sdi1, sdd2
+            match = re.search(r"\b(sd[a-z][0-9]+)\b", line)
+            if match and current_pool:
+                part = match.group(1)
+                partition_map[f"/dev/{part}"] = current_pool
+    except Exception as e:
+        print(f"Error parsing zpool status: {e}")
+    return partition_map
+
+
+def get_pool_for_device(dev, partition_map):
+    """Tries to map a device like /dev/sdi to its pool by checking /dev/sdi1, /dev/sdi2, etc."""
+    dev_short = dev.replace("/dev/", "")
+    for part in partition_map:
+        if part.startswith(f"/dev/{dev_short}"):
+            return partition_map[part]
+    return "none"
+
 def get_zpool_device_map():
     """Returns a map of /dev/sdX -> pool name based on zpool status"""
     pool_map = {}
@@ -53,7 +82,7 @@ def get_zpool_device_map():
 @app.get("/metrics")
 def get_metrics():
     metrics = []
-    pool_map = get_zpool_device_map()
+    partition_map = get_zpool_partition_map()
 
     state_map = {
         "standby": 0,
@@ -81,9 +110,13 @@ def get_metrics():
             state = "error"
 
         type_label = get_rotational_type(dev)
-        pool_label = pool_map.get(dev, "none")
+        pool_label = get_pool_for_device(dev, partition_map)
 
-        metrics.append(f'disk_power_state{{device="{dev}",state="{state}",type="{type_label}",pool="{pool_label}"}} 1')
-        metrics.append(f'disk_power_state_value{{device="{dev}",type="{type_label}",pool="{pool_label}"}} {state_map[state]}')
+        metrics.append(
+            f'disk_power_state{{device="{dev}",state="{state}",type="{type_label}",pool="{pool_label}"}} 1'
+        )
+        metrics.append(
+            f'disk_power_state_value{{device="{dev}",type="{type_label}",pool="{pool_label}"}} {state_map[state]}'
+        )
 
     return Response("\n".join(metrics) + "\n", media_type="text/plain")
