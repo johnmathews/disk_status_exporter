@@ -21,16 +21,30 @@ def get_zpool_partition_map():
     try:
         result = subprocess.run(["zpool", "status", "-L"], capture_output=True, text=True, timeout=5)
         current_pool = None
+        in_config_section = False
+
         for line in result.stdout.splitlines():
-            if line.strip().startswith("pool:"):
-                current_pool = line.split(":", 1)[1].strip()
+            stripped = line.strip()
+
+            if stripped.startswith("pool:"):
+                current_pool = stripped.split(":", 1)[1].strip()
+                in_config_section = False
                 continue
 
-            # Match partition names like sdi1, sdd2
-            match = re.search(r"\b(sd[a-z][0-9]+)\b", line)
-            if match and current_pool:
-                part = match.group(1)
-                partition_map[f"/dev/{part}"] = current_pool
+            if stripped.startswith("config:"):
+                in_config_section = True
+                continue
+
+            if in_config_section:
+                # Skip headers and pool layout lines
+                if re.match(r"^(NAME|mirror-|special|logs|cache|spare|raidz|stripe)", stripped):
+                    continue
+
+                # Match partition-like device names, e.g. sdc1, sdd2, sda3
+                match = re.match(r"^\s*([a-zA-Z0-9]+[0-9]+)\s+ONLINE", line)
+                if match and current_pool:
+                    part = match.group(1)
+                    partition_map[f"/dev/{part}"] = current_pool
     except Exception as e:
         print(f"Error parsing zpool status: {e}")
     return partition_map
