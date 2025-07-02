@@ -50,14 +50,6 @@ def get_zpool_partition_map():
     return partition_map
 
 
-def get_pool_for_device(dev, partition_map):
-    """Tries to map a device like /dev/sdi to its pool by checking /dev/sdi1, /dev/sdi2, etc."""
-    dev_short = dev.replace("/dev/", "")
-    for part in partition_map:
-        if part.startswith(f"/dev/{dev_short}"):
-            return partition_map[part]
-    return "none"
-
 def get_zpool_device_map():
     """Returns a map of /dev/sdX -> pool name based on zpool status"""
     pool_map = {}
@@ -96,8 +88,8 @@ def get_zpool_device_map():
 @app.get("/metrics")
 def get_metrics():
     metrics = []
-    partition_map = get_zpool_partition_map()
-
+    partition_map = get_zpool_device_map()
+    
     state_map = {
         "standby": 0,
         "active_or_idle": 1,
@@ -124,7 +116,7 @@ def get_metrics():
             state = "error"
 
         type_label = get_rotational_type(dev)
-        pool_label = get_pool_for_device(dev, partition_map)
+        pool_label = partition_map.get(dev, "none")
 
         metrics.append(
             f'disk_power_state{{device="{dev}",state="{state}",type="{type_label}",pool="{pool_label}"}} 1'
