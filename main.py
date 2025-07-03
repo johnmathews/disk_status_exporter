@@ -93,6 +93,7 @@ def get_metrics():
     state_map = {
         "standby": 0,
         "active_or_idle": 1,
+        "idle": 0.5,
         "unknown": -1,
         "error": -2,
     }
@@ -110,6 +111,8 @@ def get_metrics():
                 state = "standby"
             elif "ACTIVE or IDLE" in result.stdout:
                 state = "active_or_idle"
+            elif "IDLE_B" in result.stdout:
+                state = "idle"
             else:
                 state = "unknown"
         except Exception:
