@@ -103,7 +103,7 @@ def get_metrics():
             result = subprocess.run(
                 ["smartctl", "-n", "standby", "-i", dev],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
                 timeout=10,
             )
@@ -112,9 +112,9 @@ def get_metrics():
             if result.returncode != 0:
                 print(f"[{dev}] stderr: {result.stderr.strip()}")
 
-            if "SMART support is:     Unavailable" in result.stdout:
+            if any(re.match(r"SMART support is:\s+Unavailable", line) for line in result.stdout.splitlines()):
                 #  Skip non-physical/virtual disks with no SMART support
-                print(f"disk {dev} is not S.M.A.R.T enabled")
+                print(f"[{dev}] Skipped: SMART unsupported.")
                 continue
 
             if "STANDBY" in result.stdout:
@@ -125,8 +125,13 @@ def get_metrics():
                 state = "idle"
             else:
                 state = "unknown"
-        except Exception:
-            state = "error"
+
+        except subprocess.TimeoutExpired:
+            print(f"[{dev}] Timeout reading device.")
+            continue
+        except Exception as e:
+            print(f"[{dev}] Error checking device: {e}")
+            continue
 
         type_label = get_rotational_type(dev)
         pool_label = partition_map.get(dev, "none")
