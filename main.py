@@ -107,6 +107,10 @@ def get_metrics():
                 text=True,
                 timeout=2,
             )
+            if "SMART support is: Unavailable" in result.stdout:
+                # Skip non-physical/virtual disks with no SMART support
+                continue
+
             if "STANDBY" in result.stdout:
                 state = "standby"
             elif "ACTIVE or IDLE" in result.stdout:
