@@ -105,8 +105,13 @@ def get_metrics():
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=2,
+                timeout=10,
             )
+
+            print(f"[{dev}] smartctl exit code: {result.returncode}")
+            if result.returncode != 0:
+                print(f"[{dev}] stderr: {result.stderr.strip()}")
+
             if "SMART support is:     Unavailable" in result.stdout:
                 #  Skip non-physical/virtual disks with no SMART support
                 print(f"disk {dev} is not S.M.A.R.T enabled")
