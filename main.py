@@ -107,7 +107,7 @@ def get_metrics():
                 text=True,
                 timeout=2,
             )
-            if "SMART support is: Unavailable" in result.stdout:
+            if "SMART support is:     Unavailable" in result.stdout:
                 #  Skip non-physical/virtual disks with no SMART support
                 print(f"disk {dev} is not S.M.A.R.T enabled")
                 continue
