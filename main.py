@@ -92,8 +92,8 @@ def get_metrics():
     
     state_map = {
         "standby": 0,
-        "active_or_idle": 1,
-        "idle": 0.5,
+        "active_or_idle": 2,
+        "idle": 1,
         "unknown": -1,
         "error": -2,
     }
