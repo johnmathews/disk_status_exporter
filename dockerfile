@@ -1,9 +1,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      smartmontools \
-      zfsutils-linux \
+ && apt-get install -y --no-install-recommends smartmontools zfsutils-linux \
  && pip install --no-cache-dir fastapi uvicorn \
  && rm -rf /var/lib/apt/lists/*
 
