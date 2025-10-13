@@ -19,9 +19,12 @@ STATE_MAP = {
 def device_type(dev: str) -> str:
     """
     Determine 'hdd' vs 'ssd' using smartctl -i first (does not spin up with -n standby),
-    falling back to /sys/block/*/queue/rotational. Returns 'hdd' | 'ssd' | 'unknown'.
+    then /sys/block/*/queue/rotational. Be conservative; default to 'ssd' for NVMe.
     """
-    # 1) Try SMART
+    # NVMe are non-rotational; short-circuit to SSD
+    if dev.startswith("/dev/nvme"):
+        return "ssd"
+
     try:
         proc = subprocess.run(
             ["smartctl", "-n", "standby", "-i", dev],
@@ -30,26 +33,36 @@ def device_type(dev: str) -> str:
             text=True,
             timeout=8,
         )
-        out = proc.stdout
-        # "Rotation Rate: Solid State Device" -> SSD
+        out = proc.stdout or ""
+
+        # Prefer explicit SSD signals
         if re.search(r"Rotation\s+Rate:\s+Solid\s+State\s+Device", out, re.IGNORECASE):
             return "ssd"
-        # "Rotation Rate: 5400 rpm" (or any digits) -> HDD
-        if re.search(r"Rotation\s+Rate:\s*\d+\s*rpm", out, re.IGNORECASE):
-            return "hdd"
-        # Some drives say "Non-rotating" etc.
         if re.search(r"(Non[- ]rotating|SSD)", out, re.IGNORECASE):
             return "ssd"
+
+        # Some adapters report "Rotation Rate: 0 rpm" for SSDs — treat as SSD
+        m = re.search(r"Rotation\s+Rate:\s*(\d+)\s*rpm", out, re.IGNORECASE)
+        if m:
+            try:
+                rpm = int(m.group(1))
+                if rpm > 0:
+                    return "hdd"
+                else:
+                    return "ssd"
+            except ValueError:
+                pass  # fall through
     except Exception:
         pass  # fall back to sysfs
 
-    # 2) Fallback: sysfs rotational flag
-    basename = os.path.basename(dev)
+    # Fallback: sysfs rotational flag
+    basename = os.path.basename(dev)  # e.g. sda, sdb, nvme0n1
     path = f"/sys/block/{basename}/queue/rotational"
     try:
         with open(path) as f:
             return "hdd" if f.read().strip() == "1" else "ssd"
     except Exception:
+        # Be conservative: unknown rather than claiming HDD
         return "unknown"
 
 def have_zpool() -> bool:
@@ -106,7 +119,7 @@ def get_zpool_device_map() -> Dict[str, str]:
 
             token = m.group(1)
             # reduce partitions: sda1 -> sda, nvme0n1p1 -> nvme0n1
-            disk = re.sub(r"\d+$", "", token)
+            disk = re.sub(r"p?\d+$", "", token)
             pool_map[f"/dev/{disk}"] = current_pool
 
     except subprocess.TimeoutExpired:
@@ -160,21 +173,13 @@ def smart_state_for(dev: str) -> str:
         return "error"
 
 def list_block_devs() -> list[str]:
-    """
-    Enumerate candidate block devices. We consider /dev/sdX and /dev/hdX (old) and NVMe base nodes,
-    but we will later filter to rotational only. Keeping it conservative avoids odd md/dm devices.
-    """
     devs = set()
-    # sdX (sda, sdb, ...)
+    # Only classic SATA/SAS disks
     for p in glob.glob("/dev/sd?"):
         devs.add(p)
-    # hdX (rare, legacy)
     for p in glob.glob("/dev/hd?"):
         devs.add(p)
-    # NOTE: NVMe are SSDs, but if someone has an SMR USB bridge faking NVMe, we still filter by rotational flag
-    # Base nvme devices are like /dev/nvme0n1 (partitions add p1, p2, ...)
-    for p in glob.glob("/dev/nvme*n1"):
-        devs.add(p)
+    # If you *really* want to consider NVMe later, add them back – but we skip here.
     return sorted(devs)
 
 @app.get("/metrics")
