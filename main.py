@@ -16,15 +16,41 @@ STATE_MAP = {
     "error": -2,
 }
 
-def is_rotational(dev: str) -> bool:
-    """True if /sys reports rotational (HDD)."""
+def device_type(dev: str) -> str:
+    """
+    Determine 'hdd' vs 'ssd' using smartctl -i first (does not spin up with -n standby),
+    falling back to /sys/block/*/queue/rotational. Returns 'hdd' | 'ssd' | 'unknown'.
+    """
+    # 1) Try SMART
+    try:
+        proc = subprocess.run(
+            ["smartctl", "-n", "standby", "-i", dev],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=8,
+        )
+        out = proc.stdout
+        # "Rotation Rate: Solid State Device" -> SSD
+        if re.search(r"Rotation\s+Rate:\s+Solid\s+State\s+Device", out, re.IGNORECASE):
+            return "ssd"
+        # "Rotation Rate: 5400 rpm" (or any digits) -> HDD
+        if re.search(r"Rotation\s+Rate:\s*\d+\s*rpm", out, re.IGNORECASE):
+            return "hdd"
+        # Some drives say "Non-rotating" etc.
+        if re.search(r"(Non[- ]rotating|SSD)", out, re.IGNORECASE):
+            return "ssd"
+    except Exception:
+        pass  # fall back to sysfs
+
+    # 2) Fallback: sysfs rotational flag
     basename = os.path.basename(dev)
     path = f"/sys/block/{basename}/queue/rotational"
     try:
         with open(path) as f:
-            return f.read().strip() == "1"
+            return "hdd" if f.read().strip() == "1" else "ssd"
     except Exception:
-        return False
+        return "unknown"
 
 def have_zpool() -> bool:
     """We can try zpool only if binary exists and /dev/zfs is present."""
@@ -163,20 +189,21 @@ def metrics():
     lines.append('# TYPE disk_power_state_value gauge')
 
     for dev in list_block_devs():
-        if not is_rotational(dev):
-            continue  # Only HDDs
+        dtype = device_type(dev)
+        if dtype != "hdd":
+            continue  # Only HDDs we can reasonably confirm
 
         state = smart_state_for(dev)
         if state == "error":
             # Only produce the numeric metric to make failures visible, skip the one-hot
-            type_label = "hdd"  # we know it's rotational
+            type_label = dtype
             pool_label = pool_map.get(dev, "none")
             lines.append(
                 f'disk_power_state_value{{device="{dev}",type="{type_label}",pool="{pool_label}"}} {STATE_MAP["error"]}'
             )
             continue
 
-        type_label = "hdd"  # filtered above
+        type_label = dtype
         pool_label = pool_map.get(dev, "none")
 
         # one-hot
