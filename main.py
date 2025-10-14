@@ -7,8 +7,22 @@ import re
 import shutil
 import subprocess
 from typing import Dict, Iterable, Optional
+import time
+import logging
 
 app = FastAPI()
+
+logger = logging.getLogger("disk_status_exporter")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+
+@app.on_event("startup")
+def _startup_log():
+    logger.info("disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown"))
 
 # Single numeric gauge keeps things simple. Use disk_info{} for metadata joins.
 STATE_MAP: Dict[str, int] = {
@@ -178,7 +192,7 @@ def get_zpool_device_map() -> Dict[str, str]:
                 pool_map[base] = current_pool
 
     except Exception as e:
-        print(f"[zpool] skipped (error: {e})")
+        print(f"ERR [zpool] skipped (error: {e})")
         return {}
 
     return pool_map
@@ -198,10 +212,10 @@ def smartctl_power_state(dev: str) -> str:
             timeout=10,
         )
     except subprocess.TimeoutExpired:
-        print(f"[{dev}] smartctl timeout")
+        print(f"ERR [{dev}] smartctl timeout")
         return "unknown"
     except Exception as e:
-        print(f"[{dev}] smartctl error: {e}")
+        print(f"ERR [{dev}] smartctl error: {e}")
         return "error"
 
     out = result.stdout or ""
@@ -209,7 +223,7 @@ def smartctl_power_state(dev: str) -> str:
     # Skip devices that clearly don't support SMART (e.g., virtual devices)
     for line in out.splitlines():
         if re.search(r"SMART support is:\s+Unavailable", line):
-            print(f"[{dev}] SMART unsupported; skipping")
+            print(f"INFO [{dev}] SMART unsupported; skipping")
             return "unknown"
 
     if "STANDBY" in out:
@@ -222,8 +236,19 @@ def smartctl_power_state(dev: str) -> str:
     return "unknown"
 
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
 @app.get("/metrics")
 def metrics():
+    t0 = time.perf_counter()
+    enumerated = 0
+    skipped_non_rotational = 0
+    skipped_virtual = 0
+    scanned_hdds = 0
+
     lines = []
     # Headers first
     lines.append("# HELP disk_power_state Current disk power state as a numeric code (0=standby, 1=idle, 2=active_or_idle, -1=unknown, -2=error).")
@@ -233,14 +258,20 @@ def metrics():
 
     pool_map = get_zpool_device_map()
 
-    for dev in sorted(list_block_devices()):
+    devices = sorted(list_block_devices())
+    enumerated = len(devices)
+    for dev in devices:
         # Only HDDs are monitored
         if not is_rotational(dev):
+            skipped_non_rotational += 1
             continue
 
         # Skip QEMU/virtual devices explicitly
         if is_virtual_device(dev):
+            skipped_virtual += 1
             continue
+
+        scanned_hdds += 1
 
         dtype = get_rotational_type(dev)  # should be 'hdd' here, but keep label explicit
         # Map to pool by base device name (e.g., /dev/sdd from /dev/sdd1)
@@ -261,6 +292,12 @@ def metrics():
         lines.append(
             f'disk_power_state{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} {value}'
         )
+
+    duration = time.perf_counter() - t0
+    logger.info(
+        "scan complete: enumerated=%d scanned_hdds=%d skipped_non_rotational=%d skipped_virtual=%d duration=%.3fs",
+        enumerated, scanned_hdds, skipped_non_rotational, skipped_virtual, duration
+    )
 
     body = "\n".join(lines) + "\n"
     return Response(body, media_type="text/plain")
