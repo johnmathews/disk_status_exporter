@@ -14,7 +14,7 @@ Bugs:
 
 Design Considerations:
 
-- the service should handle HDDs, SSDs and M.2 drives correctly.
+- the service should differentiate between HDDs, SSDs and M.2 drives correctly. Only HDDs need to be monitored.
 - the service should use persistent IDs and not `sd<letter>` names because these change on reboot.
 - the service should create prometheus metrics that adhere to prometheus best practice and standards.
 
