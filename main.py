@@ -15,9 +15,12 @@ app = FastAPI()
 logger = logging.getLogger("disk_status_exporter")
 if not logger.handlers:
     handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s")
-    handler.setFormatter(formatter)
     logger.addHandler(handler)
+    formatter = logging.Formatter(
+        fmt="ts=%(asctime)s level=%(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    )
+    handler.setFormatter(formatter)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 @app.on_event("startup")
