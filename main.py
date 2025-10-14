@@ -32,8 +32,8 @@ def list_block_devices() -> Iterable[str]:
         return []
 
     for kname in os.listdir(sys_block):
-        # Skip virtual and mapper/loop devices
-        if kname.startswith(("loop", "ram", "fd")) or kname.startswith(("dm-",)):
+        # Skip virtual and mapper/loop devices, and optical drives
+        if kname.startswith(("loop", "ram", "fd", "sr")) or kname.startswith(("dm-",)):
             continue
         # Example kname: sda, sdb, nvme0n1, vda, etc.
         dev = f"/dev/{kname}"
@@ -86,6 +86,39 @@ def get_persistent_id(dev: str) -> str:
         n
     ))
     return f"/dev/disk/by-id/{candidates[0]}"
+
+
+def is_virtual_device(dev: str) -> bool:
+    """
+    Heuristics to filter out QEMU/virtual devices:
+    - /sys/block/<kname>/device/{vendor,model} contains QEMU or VIRTUAL
+    - device_id starts with scsi-0QEMU_, ata-QEMU_, or virtio-
+    """
+    kname = os.path.basename(dev)
+    vendor_path = f"/sys/block/{kname}/device/vendor"
+    model_path = f"/sys/block/{kname}/device/model"
+
+    vend = ""
+    model = ""
+    try:
+        with open(vendor_path, "r") as f:
+            vend = f.read().strip().upper()
+    except Exception:
+        pass
+    try:
+        with open(model_path, "r") as f:
+            model = f.read().strip().upper()
+    except Exception:
+        pass
+
+    if "QEMU" in vend or "QEMU" in model or "VIRTUAL" in vend or "VIRTUAL" in model:
+        return True
+
+    base_id = os.path.basename(get_persistent_id(dev))
+    if base_id.startswith(("scsi-0QEMU_", "ata-QEMU_", "virtio-")):
+        return True
+
+    return False
 
 
 def get_zpool_device_map() -> Dict[str, str]:
@@ -203,6 +236,10 @@ def metrics():
     for dev in sorted(list_block_devices()):
         # Only HDDs are monitored
         if not is_rotational(dev):
+            continue
+
+        # Skip QEMU/virtual devices explicitly
+        if is_virtual_device(dev):
             continue
 
         dtype = get_rotational_type(dev)  # should be 'hdd' here, but keep label explicit
