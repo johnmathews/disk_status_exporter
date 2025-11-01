@@ -1,5 +1,7 @@
 # disk-status-exporter/main.py
 
+# monitor the status of various HDDs and create prometheus metrics showing if they are in standby, idle, etc.
+
 from fastapi import FastAPI, Response
 import os
 import glob
@@ -23,15 +25,19 @@ if not logger.handlers:
     handler.setFormatter(formatter)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
+
 @app.on_event("startup")
 def _startup_log():
-    logger.info("disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown"))
+    logger.info(
+        "disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown")
+    )
 
-# Single numeric gauge keeps things simple. Use disk_info{} for metadata joins.
+
+# Numeric mapping kept for backward compatibility with existing Prometheus rules.
 STATE_MAP: Dict[str, int] = {
     "standby": 0,
-    "idle": 1,              # IDLE_B maps to idle
-    "active_or_idle": 2,    # ACTIVE or IDLE (can't distinguish further)
+    "idle": 1,  # IDLE / IDLE_A / IDLE_B / IDLE_C map to idle
+    "active_or_idle": 2,  # ACTIVE or IDLE (cannot distinguish further)
     "unknown": -1,
     "error": -2,
 }
@@ -52,7 +58,6 @@ def list_block_devices() -> Iterable[str]:
         # Skip virtual and mapper/loop devices, and optical drives
         if kname.startswith(("loop", "ram", "fd", "sr")) or kname.startswith(("dm-",)):
             continue
-        # Example kname: sda, sdb, nvme0n1, vda, etc.
         dev = f"/dev/{kname}"
         if os.path.exists(dev):
             yield dev
@@ -96,20 +101,15 @@ def get_persistent_id(dev: str) -> str:
     if not candidates:
         return dev
 
-    # Prefer human-friendly, stable prefixes
-    candidates.sort(key=lambda n: (
-        0 if n.startswith(PREFERRED_ID_PREFIX) else 1,
-        len(n),
-        n
-    ))
+    candidates.sort(
+        key=lambda n: (0 if n.startswith(PREFERRED_ID_PREFIX) else 1, len(n), n)
+    )
     return f"/dev/disk/by-id/{candidates[0]}"
 
 
 def is_virtual_device(dev: str) -> bool:
     """
-    Heuristics to filter out QEMU/virtual devices:
-    - /sys/block/<kname>/device/{vendor,model} contains QEMU or VIRTUAL
-    - device_id starts with scsi-0QEMU_, ata-QEMU_, or virtio-
+    Heuristics to filter out QEMU/virtual devices.
     """
     kname = os.path.basename(dev)
     vendor_path = f"/sys/block/{kname}/device/vendor"
@@ -149,7 +149,6 @@ def get_zpool_device_map() -> Dict[str, str]:
 
     pool_map: Dict[str, str] = {}
     try:
-        # -P prints full paths, -L follows symlinks
         result = subprocess.run(
             ["zpool", "status", "-L", "-P"],
             capture_output=True,
@@ -177,8 +176,6 @@ def get_zpool_device_map() -> Dict[str, str]:
             if re.match(r"^(NAME|mirror-|special|logs|spare|cache|raidz|stripe)", s):
                 continue
 
-            # Try to capture a real device path, possibly a partition
-            # e.g. /dev/sdd1, /dev/disk/by-id/ata-SN123-part1
             m = re.match(r"^(/dev/\S+)", s)
             if not m:
                 continue
@@ -186,7 +183,6 @@ def get_zpool_device_map() -> Dict[str, str]:
             devpath = m.group(1)
             # Strip partition suffix for base disk, but keep /dev/disk/by-id paths
             if devpath.startswith("/dev/disk/by-id/"):
-                # Try to resolve to real base device for matching
                 real = os.path.realpath(devpath)
                 base = re.sub(r"[0-9]+$", "", real)
                 pool_map[base] = current_pool
@@ -201,10 +197,11 @@ def get_zpool_device_map() -> Dict[str, str]:
     return pool_map
 
 
-def smartctl_power_state(dev: str) -> str:
+def smartctl_power_mode_raw(dev: str) -> str:
     """
-    Use smartctl without waking the drive to infer power state from stdout.
-    We don't trust the exit code (bitmask). We only parse strings.
+    Return the raw power mode string from smartctl stdout without waking the disk.
+    Example values: STANDBY, IDLE_A, IDLE_B, IDLE_C, IDLE, ACTIVE or IDLE, SLEEP.
+    Returns 'UNKNOWN' or 'ERROR' when appropriate.
     """
     try:
         result = subprocess.run(
@@ -216,27 +213,43 @@ def smartctl_power_state(dev: str) -> str:
         )
     except subprocess.TimeoutExpired:
         print(f"ERR [{dev}] smartctl timeout")
-        return "unknown"
+        return "UNKNOWN"
     except Exception as e:
         print(f"ERR [{dev}] smartctl error: {e}")
-        return "error"
+        return "ERROR"
 
     out = result.stdout or ""
+    m = re.search(r"Power mode (?:is|was):\s*(.+)", out)
+    if m:
+        return m.group(1).strip()
+    return "UNKNOWN"
 
-    # Skip devices that clearly don't support SMART (e.g., virtual devices)
-    for line in out.splitlines():
-        if re.search(r"SMART support is:\s+Unavailable", line):
-            print(f"INFO [{dev}] SMART unsupported; skipping")
-            return "unknown"
 
-    if "STANDBY" in out:
+def normalize_mode_for_numeric(raw: str) -> str:
+    """
+    Map raw smartctl mode back to the existing numeric categories.
+    SLEEP is treated like STANDBY (spun down).
+    """
+    u = (raw or "").upper()
+    if u in ("STANDBY", "SLEEP"):
         return "standby"
-    if "IDLE_B" in out:
+    if u in ("IDLE", "IDLE_A", "IDLE_B", "IDLE_C"):
         return "idle"
-    if "ACTIVE or IDLE" in out:
+    if u == "ACTIVE OR IDLE":
         return "active_or_idle"
-
+    if u == "ERROR":
+        return "error"
     return "unknown"
+
+
+def prom_escape_label_value(s: str) -> str:
+    """
+    Escape a string for Prometheus label value context:
+    backslash, double-quote, and newline.
+    """
+    if s is None:
+        return ""
+    return s.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
 
 @app.get("/healthz")
@@ -254,9 +267,17 @@ def metrics():
 
     lines = []
     # Headers first
-    lines.append("# HELP disk_power_state Current disk power state as a numeric code (0=standby, 1=idle, 2=active_or_idle, -1=unknown, -2=error).")
+    lines.append(
+        "# HELP disk_power_state Current disk power state as a numeric code (0=standby, 1=idle, 2=active_or_idle, -1=unknown, -2=error)."
+    )
     lines.append("# TYPE disk_power_state gauge")
-    lines.append("# HELP disk_info Static labels describing the disk (type/pool). Always 1.")
+    lines.append(
+        "# HELP disk_power_mode_info Disk power mode as reported by smartctl (label state=...). Always 1."
+    )
+    lines.append("# TYPE disk_power_mode_info gauge")
+    lines.append(
+        "# HELP disk_info Static labels describing the disk (type/pool). Always 1."
+    )
     lines.append("# TYPE disk_info gauge")
 
     pool_map = get_zpool_device_map()
@@ -276,22 +297,26 @@ def metrics():
 
         scanned_hdds += 1
 
-        dtype = get_rotational_type(dev)  # should be 'hdd' here, but keep label explicit
-        # Map to pool by base device name (e.g., /dev/sdd from /dev/sdd1)
+        dtype = get_rotational_type(dev)  # should be 'hdd' here
         base = re.sub(r"[0-9]+$", "", dev)
         pool = pool_map.get(base, "none")
-
         device_id = get_persistent_id(dev)
 
-        state = smartctl_power_state(dev)
-        value = STATE_MAP.get(state, STATE_MAP["unknown"])
+        raw_mode = smartctl_power_mode_raw(dev)
+        norm_key = normalize_mode_for_numeric(raw_mode)
+        value = STATE_MAP.get(norm_key, STATE_MAP["unknown"])
 
         # info metric (1) to carry metadata labels for joins
         lines.append(
             f'disk_info{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} 1'
         )
 
-        # primary numeric state metric
+        # new textual mode metric (always 1), with state label (escaped)
+        lines.append(
+            f'disk_power_mode_info{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}",state="{prom_escape_label_value(raw_mode)}"}} 1'
+        )
+
+        # primary numeric state metric (unchanged for compatibility)
         lines.append(
             f'disk_power_state{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} {value}'
         )
@@ -299,7 +324,11 @@ def metrics():
     duration = time.perf_counter() - t0
     logger.info(
         "scan complete: enumerated=%d scanned_hdds=%d skipped_non_rotational=%d skipped_virtual=%d duration=%.3fs",
-        enumerated, scanned_hdds, skipped_non_rotational, skipped_virtual, duration
+        enumerated,
+        scanned_hdds,
+        skipped_non_rotational,
+        skipped_virtual,
+        duration,
     )
 
     body = "\n".join(lines) + "\n"
