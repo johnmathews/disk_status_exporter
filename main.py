@@ -23,15 +23,20 @@ if not logger.handlers:
     handler.setFormatter(formatter)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
+
 @app.on_event("startup")
 def _startup_log():
-    logger.info("disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown"))
+    logger.info(
+        "disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown")
+    )
+
 
 # Single numeric gauge keeps things simple. Use disk_info{} for metadata joins.
 STATE_MAP: Dict[str, int] = {
     "standby": 0,
-    "idle": 1,              # IDLE_B maps to idle
-    "active_or_idle": 2,    # ACTIVE or IDLE (can't distinguish further)
+    "sleep": 0.5,
+    "idle": 1,
+    "active_or_idle": 2,
     "unknown": -1,
     "error": -2,
 }
@@ -97,11 +102,9 @@ def get_persistent_id(dev: str) -> str:
         return dev
 
     # Prefer human-friendly, stable prefixes
-    candidates.sort(key=lambda n: (
-        0 if n.startswith(PREFERRED_ID_PREFIX) else 1,
-        len(n),
-        n
-    ))
+    candidates.sort(
+        key=lambda n: (0 if n.startswith(PREFERRED_ID_PREFIX) else 1, len(n), n)
+    )
     return f"/dev/disk/by-id/{candidates[0]}"
 
 
@@ -231,8 +234,18 @@ def smartctl_power_state(dev: str) -> str:
 
     if "STANDBY" in out:
         return "standby"
+    if "SLEEP" in out:
+        return "sleep"
+    if "IDLE_A" in out:
+        return "idle"
     if "IDLE_B" in out:
         return "idle"
+    if "IDLE_C" in out:
+        return "idle"
+    if "IDLE" in out:
+        return "idle"
+    if "ACTIVE" in out:
+        return "active_or_idle"
     if "ACTIVE or IDLE" in out:
         return "active_or_idle"
 
@@ -254,9 +267,13 @@ def metrics():
 
     lines = []
     # Headers first
-    lines.append("# HELP disk_power_state Current disk power state as a numeric code (0=standby, 1=idle, 2=active_or_idle, -1=unknown, -2=error).")
+    lines.append(
+        "# HELP disk_power_state Current disk power state as a numeric code (0=standby, 0.5=sleep, 1=idle, 2=active_or_idle, -1=unknown, -2=error)."
+    )
     lines.append("# TYPE disk_power_state gauge")
-    lines.append("# HELP disk_info Static labels describing the disk (type/pool). Always 1.")
+    lines.append(
+        "# HELP disk_info Static labels describing the disk (type/pool). Always 1."
+    )
     lines.append("# TYPE disk_info gauge")
 
     pool_map = get_zpool_device_map()
@@ -276,7 +293,9 @@ def metrics():
 
         scanned_hdds += 1
 
-        dtype = get_rotational_type(dev)  # should be 'hdd' here, but keep label explicit
+        dtype = get_rotational_type(
+            dev
+        )  # should be 'hdd' here, but keep label explicit
         # Map to pool by base device name (e.g., /dev/sdd from /dev/sdd1)
         base = re.sub(r"[0-9]+$", "", dev)
         pool = pool_map.get(base, "none")
@@ -299,7 +318,11 @@ def metrics():
     duration = time.perf_counter() - t0
     logger.info(
         "scan complete: enumerated=%d scanned_hdds=%d skipped_non_rotational=%d skipped_virtual=%d duration=%.3fs",
-        enumerated, scanned_hdds, skipped_non_rotational, skipped_virtual, duration
+        enumerated,
+        scanned_hdds,
+        skipped_non_rotational,
+        skipped_virtual,
+        duration,
     )
 
     body = "\n".join(lines) + "\n"
