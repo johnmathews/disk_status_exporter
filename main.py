@@ -33,12 +33,16 @@ def _startup_log():
 
 # Single numeric gauge keeps things simple. Use disk_info{} for metadata joins.
 STATE_MAP: Dict[str, int] = {
-    "standby": 0,
-    "sleep": 0.5,
-    "idle": 1,
-    "active_or_idle": 2,
     "unknown": -1,
     "error": -2,
+    "standby": 0,
+    "idle": 1,
+    "active_or_idle": 2,
+    "idle_a": 3,
+    "idle_b": 4,
+    "idle_c": 5,
+    "active": 6,
+    "sleep": 7,
 }
 
 PREFERRED_ID_PREFIX = ("ata-", "scsi-", "wwn-", "nvme-", "usb-", "virtio-")
@@ -237,17 +241,17 @@ def smartctl_power_state(dev: str) -> str:
     if "SLEEP" in out:
         return "sleep"
     if "IDLE_A" in out:
-        return "idle"
+        return "idle_a"
     if "IDLE_B" in out:
-        return "idle"
+        return "idle_b"
     if "IDLE_C" in out:
-        return "idle"
+        return "idle_c"
     if "IDLE" in out:
         return "idle"
-    if "ACTIVE" in out:
-        return "active_or_idle"
     if "ACTIVE or IDLE" in out:
         return "active_or_idle"
+    if "ACTIVE" in out:
+        return "active"
 
     return "unknown"
 
