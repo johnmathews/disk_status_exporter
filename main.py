@@ -28,6 +28,12 @@ if not logger.handlers:
     handler.setFormatter(formatter)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
+SMARTCTL_PATH = shutil.which("smartctl")
+if SMARTCTL_PATH is None:
+    logger.warning(
+        "smartctl binary not found in PATH; probes may fail if not installed"
+    )
+
 
 @app.on_event("startup")
 def _startup_log():
@@ -88,8 +94,10 @@ def list_block_devices() -> Iterable[str]:
         return []
 
     for kname in os.listdir(sys_block):
-        # Skip virtual and mapper/loop devices, and optical drives
-        if kname.startswith(("loop", "ram", "fd", "sr")) or kname.startswith(("dm-",)):
+        # Skip loop/ram/fd/optical, device-mapper, mdraid, and zvols
+        if kname.startswith(
+            ("loop", "ram", "fd", "sr", "md", "zd")
+        ) or kname.startswith(("dm-",)):
             continue
         # Example kname: sda, sdb, nvme0n1, vda, etc.
         dev = f"/dev/{kname}"
@@ -277,17 +285,22 @@ def smartctl_power_state(dev: str) -> str:
         return "idle_b"
     if "IDLE_C" in uout:
         return "idle_c"
-    if "ACTIVE OR IDLE" in uout:
+    if "ACTIVE OR IDLE" in uout or "ACTIVE/IDLE" in uout:
         return "active_or_idle"
     if "ACTIVE" in uout:
         return "active"
     if "IDLE" in uout:
         return "idle"
 
+    # If smartctl returned normally but none of the sleeping tokens appeared,
+    # treat it as the non-waking "active_or_idle" bucket.
+    if result.returncode == 0:
+        return "active_or_idle"
+
     return "unknown"
 
 
-async def async_highest_power_state(  # NEW
+async def async_highest_power_state(
     dev: str, attempts: int = PROBE_ATTEMPTS, interval_ms: int = PROBE_INTERVAL_MS
 ) -> str:
     """
@@ -305,7 +318,7 @@ async def async_highest_power_state(  # NEW
 
 async def gather_device_metrics(
     dev: str, pool_map: Dict[str, str]
-) -> Optional[Dict[str, object]]:  # NEW
+) -> Optional[Dict[str, object]]:
     """
     Process a single device and return a dict with metric lines and counters.
     Returns:
@@ -344,7 +357,7 @@ def healthz():
 
 
 @app.get("/metrics")
-async def metrics():  # CHANGED: async
+async def metrics():
     t0 = time.perf_counter()
     enumerated = 0
     skipped_non_rotational = 0
