@@ -9,8 +9,13 @@ import subprocess
 from typing import Dict, Iterable, Optional
 import time
 import logging
+import asyncio
 
 app = FastAPI()
+
+
+PROBE_ATTEMPTS = max(int(os.getenv("PROBE_ATTEMPTS", "5")), 1)
+PROBE_INTERVAL_MS = max(int(os.getenv("PROBE_INTERVAL_MS", "1000")), 0)
 
 logger = logging.getLogger("disk_status_exporter")
 if not logger.handlers:
@@ -29,6 +34,11 @@ def _startup_log():
     logger.info(
         "disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown")
     )
+    logger.info(
+        "probe settings: PROBE_ATTEMPTS=%d PROBE_INTERVAL_MS=%d",
+        PROBE_ATTEMPTS,
+        PROBE_INTERVAL_MS,
+    )
 
 
 # Single numeric gauge keeps things simple. Use disk_info{} for metadata joins.
@@ -45,7 +55,42 @@ STATE_MAP: Dict[str, int] = {
     "sleep": 7,
 }
 
+# seagate ironwolf pro 16TB power specification
+ACTIVITY_RANK: Dict[str, int] = {
+    "error": -1,  # treat errors as lowest, below unknown
+    "unknown": 0,
+    "sleep": 1,
+    "standby": 2,
+    "idle_a": 3,
+    "idle_b": 4,
+    "idle_c": 5,
+    "idle": 6,
+    "active_or_idle": 7,
+    "active": 8,
+}
+
 PREFERRED_ID_PREFIX = ("ata-", "scsi-", "wwn-", "nvme-", "usb-", "virtio-")
+
+
+def highest_activity_state(a: str, b: str) -> str:
+    """Return the state with higher activity according to ACTIVITY_RANK."""
+    return a if ACTIVITY_RANK.get(a, 0) >= ACTIVITY_RANK.get(b, 0) else b
+
+
+def highest_power_state(
+    dev: str, attempts: int = PROBE_ATTEMPTS, interval_ms: int = PROBE_INTERVAL_MS
+) -> str:
+    """
+    Probe smartctl multiple times (without waking the drive) and return the
+    highest-activity state observed.
+    """
+    highest = "unknown"
+    for i in range(attempts):
+        s = smartctl_power_state(dev)
+        highest = highest_activity_state(highest, s)
+        if i + 1 < attempts and interval_ms > 0:
+            time.sleep(interval_ms / 1000.0)
+    return highest
 
 
 def list_block_devices() -> Iterable[str]:
@@ -195,10 +240,11 @@ def get_zpool_device_map() -> Dict[str, str]:
             if devpath.startswith("/dev/disk/by-id/"):
                 # Try to resolve to real base device for matching
                 real = os.path.realpath(devpath)
-                base = re.sub(r"[0-9]+$", "", real)
+                base = re.sub(r"p?\d+$", "", real)
+
                 pool_map[base] = current_pool
             else:
-                base = re.sub(r"[0-9]+$", "", devpath)
+                base = re.sub(r"p?\d+$", "", devpath)
                 pool_map[base] = current_pool
 
     except Exception as e:
@@ -314,12 +360,12 @@ def metrics():
             dev
         )  # should be 'hdd' here, but keep label explicit
         # Map to pool by base device name (e.g., /dev/sdd from /dev/sdd1)
-        base = re.sub(r"[0-9]+$", "", dev)
+        base = re.sub(r"p?\d+$", "", dev)
         pool = pool_map.get(base, "none")
 
         device_id = get_persistent_id(dev)
 
-        state = smartctl_power_state(dev)
+        state = highest_power_state(dev)
         value = STATE_MAP.get(state, STATE_MAP["unknown"])
 
         # info metric (1) to carry metadata labels for joins
