@@ -6,18 +6,48 @@ readme = "readme.md"
 requires-python = ">=3.10"
 dependencies = []  # runtime deps (none right now)
 
-[tool.pytest.ini_options]
-addopts = "-q"
-pythonpath = ["."]
-asyncio_mode = "auto"
-
 [tool.uv]  # optional, just metadata for uv
 
 [dependency-groups]
 dev = [
+    "coverage>=7.11.0",
     "fastapi>=0.120.4",
     "httpx>=0.28.1",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
+    "pytest-cov>=7.0.0",
     "uvicorn>=0.38.0",
 ]
+
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+# add coverage defaults here so `pytest` alone collects coverage too
+# (you can still override in CI)
+# note: keep paths simple for your repo layout
+# measure branch coverage, include only your app file
+addopts = "-q --cov=main --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml --cov-report=html"
+
+
+[tool.coverage.run]
+branch = true
+source = ["main"]          # measure coverage for main.py
+omit = [
+  "tests/*",
+]
+# enable per-test contexts to make HTML report show which test hit lines
+dynamic_context = "test_function"
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+precision = 1
+fail_under = 85            # tweak to taste
+
+[tool.coverage.html]
+directory = "htmlcov"
+title = "disk-status-exporter coverage"
+
+[tool.coverage.xml]
+output = "coverage.xml"
