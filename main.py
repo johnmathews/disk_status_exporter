@@ -13,9 +13,9 @@ import asyncio
 
 app = FastAPI()
 
-
 PROBE_ATTEMPTS = max(int(os.getenv("PROBE_ATTEMPTS", "5")), 1)
 PROBE_INTERVAL_MS = max(int(os.getenv("PROBE_INTERVAL_MS", "1000")), 0)
+MAX_CONCURRENCY = max(int(os.getenv("MAX_CONCURRENCY", "8")), 1)  # NEW
 
 logger = logging.getLogger("disk_status_exporter")
 if not logger.handlers:
@@ -35,9 +35,10 @@ def _startup_log():
         "disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown")
     )
     logger.info(
-        "probe settings: PROBE_ATTEMPTS=%d PROBE_INTERVAL_MS=%d",
+        "probe settings: PROBE_ATTEMPTS=%d PROBE_INTERVAL_MS=%d MAX_CONCURRENCY=%d",
         PROBE_ATTEMPTS,
         PROBE_INTERVAL_MS,
+        MAX_CONCURRENCY,
     )
 
 
@@ -75,22 +76,6 @@ PREFERRED_ID_PREFIX = ("ata-", "scsi-", "wwn-", "nvme-", "usb-", "virtio-")
 def highest_activity_state(a: str, b: str) -> str:
     """Return the state with higher activity according to ACTIVITY_RANK."""
     return a if ACTIVITY_RANK.get(a, 0) >= ACTIVITY_RANK.get(b, 0) else b
-
-
-def highest_power_state(
-    dev: str, attempts: int = PROBE_ATTEMPTS, interval_ms: int = PROBE_INTERVAL_MS
-) -> str:
-    """
-    Probe smartctl multiple times (without waking the drive) and return the
-    highest-activity state observed.
-    """
-    highest = "unknown"
-    for i in range(attempts):
-        s = smartctl_power_state(dev)
-        highest = highest_activity_state(highest, s)
-        if i + 1 < attempts and interval_ms > 0:
-            time.sleep(interval_ms / 1000.0)
-    return highest
 
 
 def list_block_devices() -> Iterable[str]:
@@ -241,7 +226,6 @@ def get_zpool_device_map() -> Dict[str, str]:
                 # Try to resolve to real base device for matching
                 real = os.path.realpath(devpath)
                 base = re.sub(r"p?\d+$", "", real)
-
                 pool_map[base] = current_pool
             else:
                 base = re.sub(r"p?\d+$", "", devpath)
@@ -303,13 +287,64 @@ def smartctl_power_state(dev: str) -> str:
     return "unknown"
 
 
+async def async_highest_power_state(  # NEW
+    dev: str, attempts: int = PROBE_ATTEMPTS, interval_ms: int = PROBE_INTERVAL_MS
+) -> str:
+    """
+    Probe smartctl multiple times (without waking the drive) and return the
+    highest-activity state observed. Runs the sync smartctl parser in a thread.
+    """
+    highest = "unknown"
+    for i in range(attempts):
+        s = await asyncio.to_thread(smartctl_power_state, dev)
+        highest = highest_activity_state(highest, s)
+        if i + 1 < attempts and interval_ms > 0:
+            await asyncio.sleep(interval_ms / 1000.0)
+    return highest
+
+
+async def gather_device_metrics(
+    dev: str, pool_map: Dict[str, str]
+) -> Optional[Dict[str, object]]:  # NEW
+    """
+    Process a single device and return a dict with metric lines and counters.
+    Returns:
+      {"lines": [...], "scanned_hdds": 1} OR {"skipped_non_rotational": 1} / {"skipped_virtual": 1}
+    """
+    # Only HDDs are monitored
+    if not is_rotational(dev):
+        return {"skipped_non_rotational": 1}
+
+    # Skip QEMU/virtual devices explicitly
+    if is_virtual_device(dev):
+        return {"skipped_virtual": 1}
+
+    dtype = get_rotational_type(dev)  # should be 'hdd' here, but keep label explicit
+    # Map to pool by base device name (e.g., /dev/sdd from /dev/sdd1)
+    base = re.sub(r"p?\d+$", "", dev)
+    pool = pool_map.get(base, "none")
+
+    device_id = get_persistent_id(dev)
+
+    state = await async_highest_power_state(dev)
+    value = STATE_MAP.get(state, STATE_MAP["unknown"])
+
+    # Build metric lines for this device
+    lines = [
+        f'disk_info{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} 1',
+        f'disk_power_state{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} {value}',
+        f'disk_power_state_string{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}",state="{state}"}} 1',
+    ]
+    return {"lines": lines, "scanned_hdds": 1}
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
 
 @app.get("/metrics")
-def metrics():
+async def metrics():  # CHANGED: async
     t0 = time.perf_counter()
     enumerated = 0
     skipped_non_rotational = 0
@@ -343,45 +378,26 @@ def metrics():
 
     devices = sorted(list_block_devices())
     enumerated = len(devices)
-    for dev in devices:
-        # Only HDDs are monitored
-        if not is_rotational(dev):
-            skipped_non_rotational += 1
+
+    # Run per-device probes concurrently, bounded by a semaphore
+    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+
+    async def run_with_sem(dev):
+        async with sem:
+            return await gather_device_metrics(dev, pool_map)
+
+    tasks = [asyncio.create_task(run_with_sem(dev)) for dev in devices]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    # Collect results
+    for r in results:
+        if not r:
             continue
-
-        # Skip QEMU/virtual devices explicitly
-        if is_virtual_device(dev):
-            skipped_virtual += 1
-            continue
-
-        scanned_hdds += 1
-
-        dtype = get_rotational_type(
-            dev
-        )  # should be 'hdd' here, but keep label explicit
-        # Map to pool by base device name (e.g., /dev/sdd from /dev/sdd1)
-        base = re.sub(r"p?\d+$", "", dev)
-        pool = pool_map.get(base, "none")
-
-        device_id = get_persistent_id(dev)
-
-        state = highest_power_state(dev)
-        value = STATE_MAP.get(state, STATE_MAP["unknown"])
-
-        # info metric (1) to carry metadata labels for joins
-        lines.append(
-            f'disk_info{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} 1'
-        )
-
-        # primary numeric state metric
-        lines.append(
-            f'disk_power_state{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} {value}'
-        )
-
-        # string/label view for Grafana state timeline tooltips
-        lines.append(
-            f'disk_power_state_string{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}",state="{state}"}} 1'
-        )
+        skipped_non_rotational += r.get("skipped_non_rotational", 0)
+        skipped_virtual += r.get("skipped_virtual", 0)
+        scanned_hdds += r.get("scanned_hdds", 0)
+        for line in r.get("lines", []):
+            lines.append(line)
 
     duration = time.perf_counter() - t0
 
