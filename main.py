@@ -10,8 +10,7 @@ from typing import Dict, Iterable, Optional
 import time
 import logging
 import asyncio
-
-app = FastAPI()
+from contextlib import asynccontextmanager
 
 PROBE_ATTEMPTS = max(int(os.getenv("PROBE_ATTEMPTS", "5")), 1)
 PROBE_INTERVAL_MS = max(int(os.getenv("PROBE_INTERVAL_MS", "1000")), 0)
@@ -35,8 +34,9 @@ if SMARTCTL_PATH is None:
     )
 
 
-@app.on_event("startup")
-def _startup_log():
+# ---- Lifespan (replaces deprecated on_event startup) ----
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     logger.info(
         "disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown")
     )
@@ -46,7 +46,10 @@ def _startup_log():
         PROBE_INTERVAL_MS,
         MAX_CONCURRENCY,
     )
+    yield
 
+
+app = FastAPI(lifespan=lifespan)
 
 # Single numeric gauge keeps things simple. Use disk_info{} for metadata joins.
 STATE_MAP: Dict[str, int] = {
