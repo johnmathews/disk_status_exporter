@@ -1,8 +1,8 @@
-name: Build and Push Docker image to GHCR
+name: Test, Build and Push Docker image to GHCR
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     tags:
       - "v*"
   workflow_dispatch:
@@ -21,6 +21,22 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # --- Tests (uv) ---
+      - name: Set up uv (with managed Python)
+        uses: astral-sh/setup-uv@v4
+        with:
+          # Use a recent uv; bump freely as you like
+          version: ">=0.4.0"
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies (all groups)
+        run: uv sync --all-groups
+
+      - name: Run tests
+        run: uv run -m pytest
+
+      # --- Build metadata ---
       - name: Compute version metadata
         id: meta
         shell: bash
@@ -36,6 +52,7 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      # --- GHCR login & build/push ---
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:

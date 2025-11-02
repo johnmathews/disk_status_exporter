@@ -1,0 +1,23 @@
+[project]
+name = "disk-status-exporter"
+version = "0.1.0"
+description = "FastAPI exporter for HDD power states"
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = []  # runtime deps (none right now)
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.uv]  # optional, just metadata for uv
+
+[dependency-groups]
+dev = [
+    "fastapi>=0.120.4",
+    "httpx>=0.28.1",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "uvicorn>=0.38.0",
+]
