@@ -13,6 +13,8 @@ dev = [
     "coverage>=7.11.0",
     "fastapi>=0.120.4",
     "httpx>=0.28.1",
+    "hypothesis>=6.143.1",
+    "mutmut>=3.3.1",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
@@ -27,23 +29,19 @@ asyncio_mode = "auto"
 # (you can still override in CI)
 # note: keep paths simple for your repo layout
 # measure branch coverage, include only your app file
-addopts = "-q --cov=main --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml --cov-report=html"
+addopts = "-q --cov=main --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml --cov-report=html --cov-context=test"
 
 
 [tool.coverage.run]
 branch = true
-source = ["main"]          # measure coverage for main.py
-omit = [
-  "tests/*",
-]
-# enable per-test contexts to make HTML report show which test hit lines
-dynamic_context = "test_function"
+source = ["main"]
+omit = ["tests/*"]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
 precision = 1
-fail_under = 85            # tweak to taste
+fail_under = 85
 
 [tool.coverage.html]
 directory = "htmlcov"
