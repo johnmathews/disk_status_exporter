@@ -202,7 +202,7 @@ def get_zpool_device_map() -> Dict[str, str]:
                 pool_map[base] = current_pool
 
     except Exception as e:
-        print(f"ERR [zpool] skipped (error: {e})")
+        logger.error(f"ERR [zpool] skipped (error: {e})")
         return {}
 
     return pool_map
@@ -222,36 +222,37 @@ def smartctl_power_state(dev: str) -> str:
             timeout=10,
         )
     except subprocess.TimeoutExpired:
-        print(f"ERR [{dev}] smartctl timeout")
+        logger.error(f"ERR [{dev}] smartctl timeout")
         return "unknown"
     except Exception as e:
-        print(f"ERR [{dev}] smartctl error: {e}")
+        logger.error(f"ERR [{dev}] smartctl error: {e}")
         return "error"
 
     out = result.stdout or ""
+    uout = out.upper()
 
     # Skip devices that clearly don't support SMART (e.g., virtual devices)
     for line in out.splitlines():
-        if re.search(r"SMART support is:\s+Unavailable", line):
-            print(f"INFO [{dev}] SMART unsupported; skipping")
+        if re.search(r"SMART support is:\s+Unavailable", line, flags=re.IGNORECASE):
+            logger.info("INFO [%s] SMART unsupported; skipping", dev)
             return "unknown"
 
-    if "STANDBY" in out:
+    if "STANDBY" in uout:
         return "standby"
-    if "SLEEP" in out:
+    if "SLEEP" in uout:
         return "sleep"
-    if "IDLE_A" in out:
+    if "IDLE_A" in uout:
         return "idle_a"
-    if "IDLE_B" in out:
+    if "IDLE_B" in uout:
         return "idle_b"
-    if "IDLE_C" in out:
+    if "IDLE_C" in uout:
         return "idle_c"
-    if "IDLE" in out:
-        return "idle"
-    if "ACTIVE or IDLE" in out:
+    if "ACTIVE OR IDLE" in uout:
         return "active_or_idle"
-    if "ACTIVE" in out:
+    if "ACTIVE" in uout:
         return "active"
+    if "IDLE" in uout:
+        return "idle"
 
     return "unknown"
 
@@ -272,13 +273,25 @@ def metrics():
     lines = []
     # Headers first
     lines.append(
-        "# HELP disk_power_state Current disk power state as a numeric code (0=standby, 0.5=sleep, 1=idle, 2=active_or_idle, -1=unknown, -2=error)."
+        "# HELP disk_power_state Current disk power state as a numeric code "
+        "(0=standby, 7=sleep, 1=idle, 2=active_or_idle, -1=unknown, -2=error, "
+        "3=idle_a, 4=idle_b, 5=idle_c, 6=active)."
     )
     lines.append("# TYPE disk_power_state gauge")
     lines.append(
         "# HELP disk_info Static labels describing the disk (type/pool). Always 1."
     )
     lines.append("# TYPE disk_info gauge")
+    lines.append(
+        "# HELP disk_power_state_string Always 1; carries the current power state as the 'state' label for display."
+    )
+    lines.append("# TYPE disk_power_state_string gauge")
+    lines.append(
+        "# HELP disk_exporter_scan_seconds Duration of the last scan in seconds."
+    )
+    lines.append("# TYPE disk_exporter_scan_seconds gauge")
+    lines.append("# HELP disk_exporter_devices_total Devices seen / scanned / skipped.")
+    lines.append("# TYPE disk_exporter_devices_total gauge")
 
     pool_map = get_zpool_device_map()
 
@@ -319,7 +332,23 @@ def metrics():
             f'disk_power_state{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} {value}'
         )
 
+        # string/label view for Grafana state timeline tooltips
+        lines.append(
+            f'disk_power_state_string{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}",state="{state}"}} 1'
+        )
+
     duration = time.perf_counter() - t0
+
+    lines.append(f"disk_exporter_scan_seconds {duration:.6f}")
+    lines.append(f'disk_exporter_devices_total{{kind="enumerated"}} {enumerated}')
+    lines.append(f'disk_exporter_devices_total{{kind="scanned_hdds"}} {scanned_hdds}')
+    lines.append(
+        f'disk_exporter_devices_total{{kind="skipped_non_rotational"}} {skipped_non_rotational}'
+    )
+    lines.append(
+        f'disk_exporter_devices_total{{kind="skipped_virtual"}} {skipped_virtual}'
+    )
+
     logger.info(
         "scan complete: enumerated=%d scanned_hdds=%d skipped_non_rotational=%d skipped_virtual=%d duration=%.3fs",
         enumerated,
