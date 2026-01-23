@@ -34,6 +34,26 @@ State codes:
 
 A /healthz endpoint returns simple JSON status.
 
+## Configuration
+
+Environment variables control probe behavior:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROBE_ATTEMPTS` | 1 | Number of smartctl probes per scrape. Single probe is recommended to minimize wake risk. |
+| `PROBE_INTERVAL_MS` | 1000 | Milliseconds between probe attempts (when `PROBE_ATTEMPTS` > 1). |
+| `MAX_CONCURRENCY` | 8 | Maximum concurrent device probes. |
+| `COOLDOWN_SECONDS` | 300 | Seconds to skip a device after a timeout. Prevents repeated wake attempts on unresponsive drives. |
+| `LOG_LEVEL` | INFO | Logging verbosity (DEBUG, INFO, WARNING, ERROR). |
+
+### HDD Wake Prevention
+
+The exporter uses several techniques to avoid waking sleeping HDDs:
+
+- **SATA passthrough** (`-d sat,12`): Tells smartctl the device type explicitly, skipping autodetection probes that can wake drives.
+- **Single probe by default**: `PROBE_ATTEMPTS=1` minimizes wake opportunities per scrape.
+- **Timeout cooldown**: Devices that timeout (often indicating spin-up) are skipped for `COOLDOWN_SECONDS` to avoid repeated wake attempts.
+
 ## How to Deploy
 
 Build or pull the image from GitHub Container Registry:

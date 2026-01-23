@@ -12,7 +12,7 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 
-PROBE_ATTEMPTS = max(int(os.getenv("PROBE_ATTEMPTS", "5")), 1)
+PROBE_ATTEMPTS = max(int(os.getenv("PROBE_ATTEMPTS", "1")), 1)
 PROBE_INTERVAL_MS = max(int(os.getenv("PROBE_INTERVAL_MS", "1000")), 0)
 MAX_CONCURRENCY = max(int(os.getenv("MAX_CONCURRENCY", "8")), 1)  # NEW
 
@@ -33,6 +33,27 @@ if SMARTCTL_PATH is None:
         "smartctl binary not found in PATH; probes may fail if not installed"
     )
 
+# Cooldown tracking for devices that timeout
+_device_cooldowns: Dict[str, float] = {}
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "300"))  # 5 minutes default
+
+
+def is_device_in_cooldown(dev: str) -> bool:
+    """Check if device should be skipped due to recent timeout."""
+    if dev in _device_cooldowns:
+        if time.time() < _device_cooldowns[dev]:
+            return True
+        del _device_cooldowns[dev]
+    return False
+
+
+def set_device_cooldown(dev: str):
+    """Mark device for cooldown after timeout."""
+    _device_cooldowns[dev] = time.time() + COOLDOWN_SECONDS
+    logger.warning(
+        "device=%s entering cooldown for %ds after timeout", dev, COOLDOWN_SECONDS
+    )
+
 
 # ---- Lifespan (replaces deprecated on_event startup) ----
 @asynccontextmanager
@@ -41,10 +62,11 @@ async def lifespan(app: FastAPI):
         "disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown")
     )
     logger.info(
-        "probe settings: PROBE_ATTEMPTS=%d PROBE_INTERVAL_MS=%d MAX_CONCURRENCY=%d",
+        "probe settings: PROBE_ATTEMPTS=%d PROBE_INTERVAL_MS=%d MAX_CONCURRENCY=%d COOLDOWN_SECONDS=%d",
         PROBE_ATTEMPTS,
         PROBE_INTERVAL_MS,
         MAX_CONCURRENCY,
+        COOLDOWN_SECONDS,
     )
     yield
 
@@ -254,15 +276,20 @@ def smartctl_power_state(dev: str) -> str:
     Use smartctl without waking the drive to infer power state from stdout.
     We don't trust the exit code (bitmask). We only parse strings.
     """
+    if is_device_in_cooldown(dev):
+        logger.debug("device=%s skipped (in cooldown)", dev)
+        return "unknown"
+
     try:
         result = subprocess.run(
-            ["smartctl", "-n", "standby", "-i", dev],
+            ["smartctl", "-d", "sat,12", "-n", "standby", "-i", dev],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=10,
         )
     except subprocess.TimeoutExpired:
+        set_device_cooldown(dev)
         logger.error(f"ERR [{dev}] smartctl timeout")
         return "unknown"
     except Exception as e:
