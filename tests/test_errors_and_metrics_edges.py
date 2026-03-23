@@ -1,6 +1,7 @@
 # tests/test_errors_and_metrics_edges.py
-from fastapi.testclient import TestClient
 import subprocess
+
+from fastapi.testclient import TestClient
 
 import main
 
@@ -58,19 +59,11 @@ def test_metrics_unknown_state_fallback(monkeypatch):
     # unknown -> STATE_MAP fallback to -1; label order includes device_id before device
     lines = body.splitlines()
     ps_line = next(
-        (
-            ln
-            for ln in lines
-            if ln.startswith("disk_power_state{") and 'device="/dev/sdy"' in ln
-        ),
+        (ln for ln in lines if ln.startswith("disk_power_state{") and 'device="/dev/sdy"' in ln),
         None,
     )
-    assert (
-        ps_line is not None
-    ), f"disk_power_state line for /dev/sdy not found.\nBody:\n{body}"
-    assert ps_line.strip().endswith(
-        " -1"
-    ), f"Expected value -1 for unknown state, got: {ps_line}"
+    assert ps_line is not None, f"disk_power_state line for /dev/sdy not found.\nBody:\n{body}"
+    assert ps_line.strip().endswith(" -1"), f"Expected value -1 for unknown state, got: {ps_line}"
 
     # And the string metric should carry the original unknown state label
     assert "disk_power_state_string" in body

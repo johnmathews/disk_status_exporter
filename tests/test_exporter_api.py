@@ -1,6 +1,6 @@
 # tests/test_exporter_api.py
+
 from fastapi.testclient import TestClient
-import types
 
 import main  # your exporter module
 
@@ -54,18 +54,18 @@ def test_metrics_happy_path(monkeypatch):
         in body
     )
     assert (
-        'disk_power_state_string{device_id="/dev/disk/by-id/FAKE-sda",device="/dev/sda",type="hdd",pool="tank",state="standby"} 1'
-        in body
+        'disk_power_state_string{device_id="/dev/disk/by-id/FAKE-sda",'
+        'device="/dev/sda",type="hdd",pool="tank",state="standby"} 1' in body
     )
 
     # sdb metrics
     assert (
-        'disk_info{device_id="/dev/disk/by-id/FAKE-sdb",device="/dev/sdb",type="hdd",pool="backup"} 1'
-        in body
+        'disk_info{device_id="/dev/disk/by-id/FAKE-sdb",'
+        'device="/dev/sdb",type="hdd",pool="backup"} 1' in body
     )
     assert (
-        'disk_power_state_string{device_id="/dev/disk/by-id/FAKE-sdb",device="/dev/sdb",type="hdd",pool="backup",state="active"} 1'
-        in body
+        'disk_power_state_string{device_id="/dev/disk/by-id/FAKE-sdb",'
+        'device="/dev/sdb",type="hdd",pool="backup",state="active"} 1' in body
     )
 
     # device counters
@@ -79,9 +79,7 @@ def test_metrics_skip_non_rotational_and_virtual(monkeypatch):
     client = TestClient(main.app)
 
     # 3 devices: one SSD, one virtual, one real HDD
-    monkeypatch.setattr(
-        main, "list_block_devices", lambda: ["/dev/sda", "/dev/sdb", "/dev/sdc"]
-    )
+    monkeypatch.setattr(main, "list_block_devices", lambda: ["/dev/sda", "/dev/sdb", "/dev/sdc"])
 
     def fake_is_rotational(dev):
         return dev != "/dev/sda"  # sda -> SSD (non-rotational)

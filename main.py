@@ -1,16 +1,17 @@
 # disk-status-exporter/main.py
 
-from fastapi import FastAPI, Response
-import os
+import asyncio
 import glob
+import logging
+import os
 import re
 import shutil
 import subprocess
-from typing import Dict, Iterable, Optional
 import time
-import logging
-import asyncio
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Response
 
 PROBE_ATTEMPTS = max(int(os.getenv("PROBE_ATTEMPTS", "1")), 1)
 PROBE_INTERVAL_MS = max(int(os.getenv("PROBE_INTERVAL_MS", "1000")), 0)
@@ -29,12 +30,10 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 SMARTCTL_PATH = shutil.which("smartctl")
 if SMARTCTL_PATH is None:
-    logger.warning(
-        "smartctl binary not found in PATH; probes may fail if not installed"
-    )
+    logger.warning("smartctl binary not found in PATH; probes may fail if not installed")
 
 # Cooldown tracking for devices that timeout
-_device_cooldowns: Dict[str, float] = {}
+_device_cooldowns: dict[str, float] = {}
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "300"))  # 5 minutes default
 
 
@@ -50,19 +49,16 @@ def is_device_in_cooldown(dev: str) -> bool:
 def set_device_cooldown(dev: str):
     """Mark device for cooldown after timeout."""
     _device_cooldowns[dev] = time.time() + COOLDOWN_SECONDS
-    logger.warning(
-        "device=%s entering cooldown for %ds after timeout", dev, COOLDOWN_SECONDS
-    )
+    logger.warning("device=%s entering cooldown for %ds after timeout", dev, COOLDOWN_SECONDS)
 
 
 # ---- Lifespan (replaces deprecated on_event startup) ----
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown"))
     logger.info(
-        "disk-status-exporter starting (version=%s)", os.getenv("VERSION", "unknown")
-    )
-    logger.info(
-        "probe settings: PROBE_ATTEMPTS=%d PROBE_INTERVAL_MS=%d MAX_CONCURRENCY=%d COOLDOWN_SECONDS=%d",
+        "probe settings: PROBE_ATTEMPTS=%d PROBE_INTERVAL_MS=%d"
+        " MAX_CONCURRENCY=%d COOLDOWN_SECONDS=%d",
         PROBE_ATTEMPTS,
         PROBE_INTERVAL_MS,
         MAX_CONCURRENCY,
@@ -74,7 +70,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # Single numeric gauge keeps things simple. Use disk_info{} for metadata joins.
-STATE_MAP: Dict[str, int] = {
+STATE_MAP: dict[str, int] = {
     "unknown": -1,
     "error": -2,
     "standby": 0,
@@ -88,7 +84,7 @@ STATE_MAP: Dict[str, int] = {
 }
 
 # seagate ironwolf pro 16TB power specification
-ACTIVITY_RANK: Dict[str, int] = {
+ACTIVITY_RANK: dict[str, int] = {
     "error": -1,  # treat errors as lowest, below unknown
     "unknown": 0,
     "sleep": 1,
@@ -120,9 +116,7 @@ def list_block_devices() -> Iterable[str]:
 
     for kname in os.listdir(sys_block):
         # Skip loop/ram/fd/optical, device-mapper, mdraid, and zvols
-        if kname.startswith(
-            ("loop", "ram", "fd", "sr", "md", "zd")
-        ) or kname.startswith(("dm-",)):
+        if kname.startswith(("loop", "ram", "fd", "sr", "md", "zd")) or kname.startswith(("dm-",)):
             continue
         # Example kname: sda, sdb, nvme0n1, vda, etc.
         dev = f"/dev/{kname}"
@@ -137,7 +131,7 @@ def get_rotational_type(dev: str) -> str:
     kname = os.path.basename(dev)
     path = f"/sys/block/{kname}/queue/rotational"
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return "hdd" if f.read().strip() == "1" else "ssd"
     except Exception:
         return "unknown"
@@ -169,9 +163,7 @@ def get_persistent_id(dev: str) -> str:
         return dev
 
     # Prefer human-friendly, stable prefixes
-    candidates.sort(
-        key=lambda n: (0 if n.startswith(PREFERRED_ID_PREFIX) else 1, len(n), n)
-    )
+    candidates.sort(key=lambda n: (0 if n.startswith(PREFERRED_ID_PREFIX) else 1, len(n), n))
     return f"/dev/disk/by-id/{candidates[0]}"
 
 
@@ -188,12 +180,12 @@ def is_virtual_device(dev: str) -> bool:
     vend = ""
     model = ""
     try:
-        with open(vendor_path, "r") as f:
+        with open(vendor_path) as f:
             vend = f.read().strip().upper()
     except Exception:
         pass
     try:
-        with open(model_path, "r") as f:
+        with open(model_path) as f:
             model = f.read().strip().upper()
     except Exception:
         pass
@@ -202,13 +194,10 @@ def is_virtual_device(dev: str) -> bool:
         return True
 
     base_id = os.path.basename(get_persistent_id(dev))
-    if base_id.startswith(("scsi-0QEMU_", "ata-QEMU_", "virtio-")):
-        return True
-
-    return False
+    return base_id.startswith(("scsi-0QEMU_", "ata-QEMU_", "virtio-"))
 
 
-def get_zpool_device_map() -> Dict[str, str]:
+def get_zpool_device_map() -> dict[str, str]:
     """
     Optionally map base device -> zpool name by parsing `zpool status -L -P`.
     Returns dict like {"/dev/sdX": "tank"}.
@@ -217,7 +206,7 @@ def get_zpool_device_map() -> Dict[str, str]:
     if shutil.which("zpool") is None:
         return {}
 
-    pool_map: Dict[str, str] = {}
+    pool_map: dict[str, str] = {}
     try:
         # -P prints full paths, -L follows symlinks
         result = subprocess.run(
@@ -226,7 +215,7 @@ def get_zpool_device_map() -> Dict[str, str]:
             text=True,
             timeout=5,
         )
-        current_pool: Optional[str] = None
+        current_pool: str | None = None
         in_config = False
 
         for raw in result.stdout.splitlines():
@@ -283,8 +272,7 @@ def smartctl_power_state(dev: str) -> str:
     try:
         result = subprocess.run(
             ["smartctl", "-d", "sat,12", "-n", "standby", "-i", dev],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=10,
         )
@@ -346,9 +334,7 @@ async def async_highest_power_state(
     return highest
 
 
-async def gather_device_metrics(
-    dev: str, pool_map: Dict[str, str]
-) -> Optional[Dict[str, object]]:
+async def gather_device_metrics(dev: str, pool_map: dict[str, str]) -> dict[str, object] | None:
     """
     Process a single device and return a dict with metric lines and counters.
     Returns:
@@ -373,10 +359,11 @@ async def gather_device_metrics(
     value = STATE_MAP.get(state, STATE_MAP["unknown"])
 
     # Build metric lines for this device
+    labels = f'device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"'
     lines = [
-        f'disk_info{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} 1',
-        f'disk_power_state{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}"}} {value}',
-        f'disk_power_state_string{{device_id="{device_id}",device="{dev}",type="{dtype}",pool="{pool}",state="{state}"}} 1',
+        f"disk_info{{{labels}}} 1",
+        f"disk_power_state{{{labels}}} {value}",
+        f'disk_power_state_string{{{labels},state="{state}"}} 1',
     ]
     return {"lines": lines, "scanned_hdds": 1}
 
@@ -402,17 +389,14 @@ async def metrics():
         "3=idle_a, 4=idle_b, 5=idle_c, 6=active)."
     )
     lines.append("# TYPE disk_power_state gauge")
-    lines.append(
-        "# HELP disk_info Static labels describing the disk (type/pool). Always 1."
-    )
+    lines.append("# HELP disk_info Static labels describing the disk (type/pool). Always 1.")
     lines.append("# TYPE disk_info gauge")
     lines.append(
-        "# HELP disk_power_state_string Always 1; carries the current power state as the 'state' label for display."
+        "# HELP disk_power_state_string Always 1;"
+        " carries the current power state as the 'state' label for display."
     )
     lines.append("# TYPE disk_power_state_string gauge")
-    lines.append(
-        "# HELP disk_exporter_scan_seconds Duration of the last scan in seconds."
-    )
+    lines.append("# HELP disk_exporter_scan_seconds Duration of the last scan in seconds.")
     lines.append("# TYPE disk_exporter_scan_seconds gauge")
     lines.append("# HELP disk_exporter_devices_total Devices seen / scanned / skipped.")
     lines.append("# TYPE disk_exporter_devices_total gauge")
@@ -450,12 +434,11 @@ async def metrics():
     lines.append(
         f'disk_exporter_devices_total{{kind="skipped_non_rotational"}} {skipped_non_rotational}'
     )
-    lines.append(
-        f'disk_exporter_devices_total{{kind="skipped_virtual"}} {skipped_virtual}'
-    )
+    lines.append(f'disk_exporter_devices_total{{kind="skipped_virtual"}} {skipped_virtual}')
 
     logger.info(
-        "scan complete: enumerated=%d scanned_hdds=%d skipped_non_rotational=%d skipped_virtual=%d duration=%.3fs",
+        "scan complete: enumerated=%d scanned_hdds=%d"
+        " skipped_non_rotational=%d skipped_virtual=%d duration=%.3fs",
         enumerated,
         scanned_hdds,
         skipped_non_rotational,

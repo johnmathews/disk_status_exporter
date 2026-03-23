@@ -1,17 +1,14 @@
 # tests/test_list_ids_virtual.py
-import os
-import glob
 import builtins
-import types
+import glob
+import os
 
 import main
 
 
 def test_list_block_devices_filters(monkeypatch):
     # Simulate /sys/block entries and existence of some /dev nodes
-    monkeypatch.setattr(
-        os.path, "isdir", lambda p: True if p == "/sys/block" else os.path.isdir(p)
-    )
+    monkeypatch.setattr(os.path, "isdir", lambda p: True if p == "/sys/block" else os.path.isdir(p))
     sys_entries = [
         "loop0",
         "ram0",
@@ -71,9 +68,7 @@ def test_get_rotational_type_ok_and_error(monkeypatch):
 
 def test_get_persistent_id_variants(monkeypatch, tmp_path):
     # Case 1: /dev/disk/by-id does not exist -> returns dev
-    monkeypatch.setattr(
-        os.path, "isdir", lambda p: False if p == "/dev/disk/by-id" else True
-    )
+    monkeypatch.setattr(os.path, "isdir", lambda p: p != "/dev/disk/by-id")
     assert main.get_persistent_id("/dev/sdz") == "/dev/sdz"
 
     # Case 2: by-id exists but no candidates -> fallback to dev
@@ -103,9 +98,7 @@ def test_get_persistent_id_variants(monkeypatch, tmp_path):
 
 def test_is_virtual_device_by_prefix(monkeypatch):
     # Skip file reads; base_id check alone should classify as virtual
-    monkeypatch.setattr(
-        main, "get_persistent_id", lambda dev: "/dev/disk/by-id/scsi-0QEMU_FAKE"
-    )
+    monkeypatch.setattr(main, "get_persistent_id", lambda dev: "/dev/disk/by-id/scsi-0QEMU_FAKE")
 
     # Force vendor/model reads to return empty (so only base_id rule applies)
     def fake_open(*a, **kw):
@@ -115,7 +108,5 @@ def test_is_virtual_device_by_prefix(monkeypatch):
     assert main.is_virtual_device("/dev/vda") is True
 
     # Non-virtual id
-    monkeypatch.setattr(
-        main, "get_persistent_id", lambda dev: "/dev/disk/by-id/ata-REAL"
-    )
+    monkeypatch.setattr(main, "get_persistent_id", lambda dev: "/dev/disk/by-id/ata-REAL")
     assert main.is_virtual_device("/dev/sda") is False
