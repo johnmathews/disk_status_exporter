@@ -2,3 +2,8 @@ __pycache__/
 htmlcov/
 .coverage*
 coverage.xml
+.env
+*.key
+*.pem
+*.secret
+credentials.json
